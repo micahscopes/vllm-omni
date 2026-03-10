@@ -11,10 +11,22 @@ RUN apt-get update && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# Install vllm-omni into the same uv-managed Python environment used by the base image.
-# Use bash -c so that $(python3 -c ...) is expanded inside the container.
-RUN uv pip install --system --no-cache-dir ".[dev]"
+# Install vLLM wheel for the specific commit
+# URL format: https://wheels.vllm.ai/<commit_hash>/
+# Current vLLM wheel commit: 6521ccf2860eb72cf23a9fa9044bf9721fd9a7c6
+# Note: --prerelease=allow is required because nightly/commit wheels use
+# pre-release version numbers (e.g. 2.10.0.dev...) which uv ignores by default,
+# causing it to fall back to the older stable release from PyPI.
+RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/6521ccf2860eb72cf23a9fa9044bf9721fd9a7c6
 
+RUN uv pip install --system --no-cache-dir ".[dev]"
+RUN uv pip install --system --upgrade \
+    "flashinfer-cubin==0.6.4" \
+    "nvidia-cublas-cu12==12.9.1.4" \
+    "numpy==2.2.6"
+RUN uv pip install --system --upgrade \
+    "flashinfer-jit-cache==0.6.4" \
+    --index-url https://flashinfer.ai/whl/cu129
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
 ENTRYPOINT []
