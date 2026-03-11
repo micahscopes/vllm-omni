@@ -67,7 +67,7 @@ from vllm.entrypoints.openai.speech_to_text.serving import (
 )
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.pooling.classify.serving import ServingClassification
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
+from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.serve.disagg.serving import ServingTokens
@@ -570,7 +570,6 @@ async def omni_init_app_state(
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -594,14 +593,13 @@ async def omni_init_app_state(
             enable_force_include_usage=args.enable_force_include_usage,
             enable_log_outputs=args.enable_log_outputs,
             enable_log_deltas=args.enable_log_deltas,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
     )
     # Warm up chat template processing to avoid first-request latency
     if state.openai_serving_chat is not None:
-        await state.openai_serving_chat.warmup()
+        state.openai_serving_chat.warmup()
 
     state.openai_serving_completion = (
         OpenAIServingCompletion(
@@ -611,7 +609,6 @@ async def omni_init_app_state(
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_force_include_usage=args.enable_force_include_usage,
-            log_error_stack=args.log_error_stack,
         )
         if "generate" in supported_tasks
         else None
@@ -625,20 +622,18 @@ async def omni_init_app_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if any(task in POOLING_TASKS for task in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
-        OpenAIServingEmbedding(
+        ServingEmbedding(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "embed" in supported_tasks
         else None
@@ -651,7 +646,6 @@ async def omni_init_app_state(
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
             trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
         else None
@@ -664,7 +658,7 @@ async def omni_init_app_state(
             score_template=resolved_chat_template,
             log_error_stack=args.log_error_stack,
         )
-        if ("embed" in supported_tasks or "score" in supported_tasks)
+        if any(t in supported_tasks for t in ("embed", "score", "token_embed"))
         else None
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
@@ -674,14 +668,12 @@ async def omni_init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         trust_request_chat_template=args.trust_request_chat_template,
-        log_error_stack=args.log_error_stack,
     )
     state.openai_serving_transcription = (
         OpenAIServingTranscription(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
@@ -692,7 +684,6 @@ async def omni_init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
@@ -722,7 +713,6 @@ async def omni_init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-            log_error_stack=args.log_error_stack,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
             enable_log_outputs=args.enable_log_outputs,
             force_no_detokenize=args.tokens_only,

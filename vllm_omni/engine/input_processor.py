@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import argsort_mm_positions
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
@@ -184,7 +185,7 @@ class OmniInputProcessor(InputProcessor):
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        self._platform_validate_request(processed_inputs, params)
+        current_platform.validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)

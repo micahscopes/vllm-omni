@@ -247,6 +247,15 @@ class OmniGenerationScheduler(VLLMScheduler):
         )
 
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+
+        # Record the request ids scheduled in this step (v0.14.0 behavior).
+        self.prev_step_scheduled_req_ids.clear()
+        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+
+        new_block_ids_to_zero = (
+            (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -258,11 +267,8 @@ class OmniGenerationScheduler(VLLMScheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             preempted_req_ids=set(),
+            new_block_ids_to_zero=new_block_ids_to_zero,
         )
-
-        # Record the request ids scheduled in this step (v0.14.0 behavior).
-        self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         # KVTransfer: package metadata
         if self.connector is not None:

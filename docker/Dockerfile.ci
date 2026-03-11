@@ -17,7 +17,7 @@ RUN apt-get update && \
 # Note: --prerelease=allow is required because nightly/commit wheels use
 # pre-release version numbers (e.g. 2.10.0.dev...) which uv ignores by default,
 # causing it to fall back to the older stable release from PyPI.
-RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/097eb544e9a22810c9b7a59e586b61627b308362
+RUN uv pip install --system --upgrade --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/84e436ed1c94b1b94f809927b5d6bff45f7af919
 
 RUN uv pip install --system --no-cache-dir ".[dev]"
 
