@@ -502,6 +502,7 @@ class OmniGenerationScheduler(VLLMScheduler):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+            self.skipped_waiting.remove_requests(stopped_preempted_reqs)
 
         # Handle failed KV load requests
         if failed_kv_load_req_ids and not self.recompute_kv_load_failures:

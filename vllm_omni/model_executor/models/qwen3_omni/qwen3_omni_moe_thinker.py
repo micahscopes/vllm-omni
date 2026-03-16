@@ -146,9 +146,11 @@ class Qwen3Omni_VisionTransformer(_Qwen3Omni_VisionTransformer):
         cu_seqlens = np.repeat(grid_thw_np[:, 1] * grid_thw_np[:, 2], grid_thw_np[:, 0]).cumsum(axis=0, dtype=np.int32)
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
 
-        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(self.attn_backend, cu_seqlens)
-        if sequence_lengths is not None:
-            sequence_lengths = torch.from_numpy(sequence_lengths).to(self.device, non_blocking=True)
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            self.attn_backend,
+            cu_seqlens,
+            self.device,
+        )
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
             dtype=torch.int32,
@@ -475,6 +477,15 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 tokenizer = self.info.get_tokenizer()
                 audio_pad_id = tokenizer.convert_tokens_to_ids("<|audio_pad|>")
                 use_audio_in_video = audio_pad_id not in prompt_ids
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(id in (video_token_id, audio_token_id) for id in prompt_ids)
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
@@ -966,13 +977,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -1064,7 +1073,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

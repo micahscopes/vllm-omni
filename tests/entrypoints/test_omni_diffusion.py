@@ -1371,8 +1371,18 @@ def test_dtype_normalization_valid_types(
     _setup_multiprocessing_mocks(monkeypatch, mocker)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
+    _setup_connector_mocks(monkeypatch, mocker)
 
+    monkeypatch.setattr(
+        "vllm_omni.entrypoints.omni.omni_snapshot_download",
+        lambda model_id: model_id,
+        raising=False,
+    )
+
+    import vllm_omni.entrypoints.omni as omni_module
     from vllm_omni.entrypoints.omni import Omni
+
+    monkeypatch.setattr(omni_module, "omni_snapshot_download", lambda model_id: model_id)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_stage_configs_from_model",
@@ -1417,8 +1427,18 @@ def test_dtype_normalization_invalid_types(monkeypatch, mocker: MockerFixture, f
     _setup_multiprocessing_mocks(monkeypatch, mocker)
     _setup_ipc_mocks(monkeypatch)
     _setup_log_mocks(monkeypatch)
+    _setup_connector_mocks(monkeypatch, mocker)
 
+    monkeypatch.setattr(
+        "vllm_omni.entrypoints.omni.omni_snapshot_download",
+        lambda model_id: model_id,
+        raising=False,
+    )
+
+    import vllm_omni.entrypoints.omni as omni_module
     from vllm_omni.entrypoints.omni import Omni
+
+    monkeypatch.setattr(omni_module, "omni_snapshot_download", lambda model_id: model_id)
 
     monkeypatch.setattr(
         "vllm_omni.entrypoints.utils.load_stage_configs_from_model",

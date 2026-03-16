@@ -116,6 +116,15 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
                 tokenizer = self.info.get_tokenizer()
                 audio_pad_id = tokenizer.convert_tokens_to_ids("<|audio_pad|>")
                 use_audio_in_video = audio_pad_id not in prompt_ids
+            # for mutilmodality cache
+            if any(item is None for item in mm_kwargs["video"]):
+                video_token_id = self.info.get_hf_config().video_token_id
+                audio_token_id = self.info.get_hf_config().audio_token_id
+                video_audio_item_num = sum(id in (video_token_id, audio_token_id) for id in prompt_ids)
+                audio_updates_num = len(mm_prompt_updates.get("audio", []))
+                video_updates_num = len(mm_prompt_updates.get("video", []))
+                if video_audio_item_num != video_updates_num + audio_updates_num:
+                    use_audio_in_video = True
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -600,7 +609,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
@@ -609,7 +617,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             input_ids,
             self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if len(multimodal_embeddings) == 0:
@@ -632,7 +639,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 input_ids,
                 self.get_language_model().embed_input_ids,
                 is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
             )
             return merge_interleaved_embeddings(
                 inputs_embeds,
@@ -649,7 +655,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
