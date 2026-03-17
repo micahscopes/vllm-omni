@@ -15,14 +15,11 @@ RUN uv pip uninstall --system -y vllm || true
 
 # Install vLLM from source at the selected commit using precompiled artifacts
 ENV VLLM_PRECOMPILED_WHEEL_COMMIT=0a0a1a198be88e1782b52fa31738896468200a76
-RUN git clone https://github.com/vllm-project/vllm.git /workspace/vllm && \
-    cd /workspace/vllm && \
-    git checkout ${VLLM_PRECOMPILED_WHEEL_COMMIT} && \
-    (uv pip uninstall --system -y vllm || true) && \
-    VLLM_USE_PRECOMPILED=1 uv pip install --system -e . && \
-    cd ${APP_DIR} && \
-    uv pip install --system ".[dev]" && \
-    uv pip install --system --upgrade \
+RUN uv pip install --system --force-reinstall --prerelease=allow vllm --extra-index-url https://wheels.vllm.ai/${VLLM_PRECOMPILED_WHEEL_COMMIT}
+
+RUN uv pip install --system ".[dev]"
+
+RUN uv pip install --system --upgrade \
         "flashinfer-cubin==0.6.6" \
         "nvidia-cublas-cu12==12.9.1.4" \
         "numpy==2.2.6"
