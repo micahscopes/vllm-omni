@@ -156,13 +156,8 @@ class Qwen3Omni_VisionTransformer(_Qwen3Omni_VisionTransformer):
             dtype=torch.int32,
             device=self.device,
         )
-        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
-            self.attn_backend,
-            cu_seqlens,
-            self.hidden_size,
-            self.tp_size,
-            self.device,
-        )
+        # Align with upstream vLLM qwen3_omni path: keep cu_seqlens in numpy for
+        # sequence length helpers and convert once for attention execution.
         cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
 
         hidden_states = hidden_states.unsqueeze(1)
