@@ -137,10 +137,6 @@ class AsyncOmni(EngineClient, OmniBase):
         prompt_text: str | None = None,
         lora_request: Any = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        trace_headers: Any = None,
-        priority: int = 0,
-        data_parallel_rank: int | None = None,
-        reasoning_ended: bool | None = None,
         sampling_params_list: Sequence[OmniSamplingParams] | None = None,
         output_modalities: list[str] | None = None,
     ) -> AsyncGenerator[OmniRequestOutput, None]:
