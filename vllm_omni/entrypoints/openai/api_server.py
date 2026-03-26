@@ -677,7 +677,7 @@ async def omni_init_app_state(
         OpenAIServingPooling(
             engine_client,
             state.openai_serving_models,
-            supported_tasks=supported_tasks,
+            state.openai_serving_render,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,

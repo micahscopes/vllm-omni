@@ -16,7 +16,7 @@ RUN uv pip uninstall --system -y vllm || true
 # Install vLLM from precompiled wheel at the selected commit.
 # Must use direct URL because the wheel has a PEP 440 local version identifier
 # (e.g. +g0a0a1a198) which pip/uv refuse to install from a PEP 503 package index.
-ENV VLLM_PRECOMPILED_WHEEL_COMMIT=d3fe85713508a69144ec610aa13253de34896338
+ENV VLLM_PRECOMPILED_WHEEL_COMMIT=35141a7eeda941a60ad5a4956670c60fd5a77029
 RUN VLLM_WHEEL_URL=$(python3 -c "import urllib.request,re; \
     html=urllib.request.urlopen('https://wheels.vllm.ai/${VLLM_PRECOMPILED_WHEEL_COMMIT}/vllm/').read().decode(); \
     m=re.search(r'>(\S+x86_64\.whl)<',html); \
