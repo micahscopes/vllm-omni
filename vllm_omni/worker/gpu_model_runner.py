@@ -56,17 +56,7 @@ for _module_name, _module in sys.modules.items():
 
 class OmniGPUModelRunner(GPUModelRunner):
     def __init__(self, *args, **kwargs):
-        import sys as _sys
-
-        vllm_cfg = kwargs.get("vllm_config") or (args[0] if args else None)
-        if vllm_cfg is not None:
-            hf_cfg = getattr(getattr(vllm_cfg, "model_config", None), "hf_config", None)
-            print(
-                f"[DEBUG-INIT] OmniGPUModelRunner.__init__ hf_config type: {type(hf_cfg)}", file=_sys.stderr, flush=True
-            )
         super().__init__(*args, **kwargs)
-        hf_cfg2 = self.vllm_config.model_config.hf_config
-        print(f"[DEBUG-INIT] After super().__init__ hf_config type: {type(hf_cfg2)}", file=_sys.stderr, flush=True)
         self.model_intermediate_buffer: dict[str, dict[str, Any]] = {}
         self._omni_num_scheduled_tokens_np: np.ndarray | None = None
         self._omni_last_model_output: object | None = None
@@ -99,29 +89,6 @@ class OmniGPUModelRunner(GPUModelRunner):
 
     @instrument(span_name="Loading (GPU)")
     def load_model(self, *args, **kwargs) -> None:
-        import sys
-
-        hf_cfg = self.vllm_config.model_config.hf_config
-        print(f"[DEBUG-SUBPROCESS] hf_config type: {type(hf_cfg)}", file=sys.stderr, flush=True)
-        print(
-            f"[DEBUG-SUBPROCESS] hf_config has thinker_config: {hasattr(hf_cfg, 'thinker_config')}",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(
-            f"[DEBUG-SUBPROCESS] model_config type: {type(self.vllm_config.model_config)}", file=sys.stderr, flush=True
-        )
-        arch = getattr(self.vllm_config.model_config, "model_arch", "N/A")
-        print(
-            f"[DEBUG-SUBPROCESS] model_config.model_arch: {arch}",
-            file=sys.stderr,
-            flush=True,
-        )
-        print(
-            f"[DEBUG-SUBPROCESS] hf_config architectures: {getattr(hf_cfg, 'architectures', 'N/A')}",
-            file=sys.stderr,
-            flush=True,
-        )
         super().load_model(*args, **kwargs)
 
         # TODO move this model specific logic to a separate class
