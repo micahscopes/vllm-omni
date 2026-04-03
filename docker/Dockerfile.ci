@@ -27,14 +27,14 @@ RUN apt-get update && \
 
 RUN uv pip install --system ".[dev]"
 
-RUN uv pip install --system --upgrade \
-        "flashinfer-cubin==0.6.6" \
-        "nvidia-cublas-cu12==12.9.1.4" \
-        "numpy==2.2.6"
+# RUN uv pip install --system --upgrade \
+#         "flashinfer-cubin==0.6.6" \
+#         "nvidia-cublas-cu12==12.9.1.4" \
+#         "numpy==2.2.6"
 
-RUN uv pip install --system --upgrade \
-    "flashinfer-jit-cache==0.6.6" \
-    --index-url https://flashinfer.ai/whl/cu129
+# RUN uv pip install --system --upgrade \
+#     "flashinfer-jit-cache==0.6.6" \
+#     --index-url https://flashinfer.ai/whl/cu129
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
 ENTRYPOINT []
