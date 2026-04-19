@@ -62,7 +62,22 @@ class OmniTensorPrefixCache:
         determined by the warmup.
         """
         for key, val in multimodal_outputs.items():
-            if isinstance(val, torch.Tensor) and val.shape[0] == seq_len and key not in self.mm_cache_keys:
+            # Require ndim >= 2 so val.shape[-1] is an actual feature dim, not
+            # an alias for the sequence dim. A 1-D per-token metadata tensor
+            # (e.g. Qwen3-TTS `ref_code_len` / `codec_streaming`, both shape
+            # [span_len]) has shape[0] == seq_len AND shape[-1] == seq_len,
+            # so without this guard the cache was being initialized with a
+            # feat_dim that equals the first request's span_len — then the
+            # second request (different span_len, still 1-D value) blew up
+            # on write with a shape-mismatch broadcast error:
+            #   flat_cache[slots] of shape [N, old_span_len] = mm_state [N]
+            # 1-D per-token signals aren't prefix-cacheable here; skip them.
+            if (
+                isinstance(val, torch.Tensor)
+                and val.ndim >= 2
+                and val.shape[0] == seq_len
+                and key not in self.mm_cache_keys
+            ):
                 feat_dim = val.shape[-1]
                 self.mm_outputs_cache[key] = self._get_cache_tensor(
                     dtype=val.dtype,
