@@ -416,6 +416,20 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
         # In-memory LRU cache for voice extraction artifacts (Base voice clone).
         self._voice_cache = VoiceEmbeddingCache()
 
+        # LRU cache for fully-built prompt embeddings keyed by
+        # (voice_name, text, language, task_type, non_streaming_mode, instruct).
+        # _build_prompt_embeds() is the expensive path (tokenize + embed +
+        # ref_audio encode + speaker encoder + codec prefill tags). Reusing
+        # its result for same-(voice, text) repeat requests — common in
+        # voice-agent lead-in phrases — shaves tens of ms off first-prefill
+        # TTFB. Values are kept on CPU (matches how preprocess stores
+        # talker_prompt_embeds) so they survive across CUDA allocator churn.
+        # Max entries capped — for the common case (1-few voices × handful
+        # of canned phrases) this is plenty; cold-start entries get evicted.
+        from collections import OrderedDict
+        self._prompt_embeds_cache: OrderedDict[tuple, tuple] = OrderedDict()
+        self._prompt_embeds_cache_max = 64
+
     # -------------------- vLLM required hooks --------------------
 
     def embed_input_ids(self, input_ids: torch.Tensor, **_: Any) -> torch.Tensor:
@@ -571,20 +585,53 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             # (out-of-phase embeddings) on every request after the first
             # whenever enable_prefix_caching was on.
             num_computed_tokens = int(info_dict.get("num_computed_tokens", 0) or 0)
-            # DIAGNOSTIC: log prefix-cache-hit parameters so we can see at
-            # runtime whether the Talker actually gets num_computed > 0 on
-            # 2nd-and-subsequent requests with an identical prompt prefix.
-            logger.info(
-                "[talker.preprocess] req=%s span_len=%d num_computed=%d is_first_prefill=%s",
-                info_dict.get("request_id"), span_len, num_computed_tokens, is_first_prefill,
-            )
             if is_first_prefill:
-                full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code = (
-                    self._build_prompt_embeds(task_type=task_type, info_dict=info_dict)
-                )
-                # Store full prompt embeddings on CPU (large, prefill-only).
-                # tailing_text_hidden and tts_pad_embed stay on GPU (gpu_resident_buffer_keys).
-                prompt_embeds_cpu = full_prompt_embeds.detach().to("cpu").contiguous()
+                # Cache key for _build_prompt_embeds: voice identity + text
+                # + language + task_type + streaming_mode + instruct. These
+                # are the inputs the builder reads; anything else (seed,
+                # request_id) is irrelevant to the output.
+                _voice_name = (info_dict.get("speaker") or [""])
+                _voice_name = _voice_name[0] if isinstance(_voice_name, list) and _voice_name else str(_voice_name or "")
+                _voice_created_at = float((info_dict.get("voice_created_at") or [0])[0] or 0)
+                _text_key = (info_dict.get("text") or [""])
+                _text_key = _text_key[0] if isinstance(_text_key, list) and _text_key else str(_text_key or "")
+                _lang_key = (info_dict.get("language") or ["Auto"])
+                _lang_key = _lang_key[0] if isinstance(_lang_key, list) and _lang_key else str(_lang_key or "Auto")
+                _instruct_key = (info_dict.get("instruct") or [""])
+                _instruct_key = _instruct_key[0] if isinstance(_instruct_key, list) and _instruct_key else str(_instruct_key or "")
+                _cache_key = (_voice_name, _voice_created_at, _text_key, _lang_key, task_type, codec_streaming, _instruct_key)
+                _cache_hit = self._prompt_embeds_cache.get(_cache_key)
+                if _cache_hit is not None:
+                    self._prompt_embeds_cache.move_to_end(_cache_key)
+                    full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code = _cache_hit
+                    logger.debug(
+                        "[talker.preprocess] prompt_embeds cache HIT for voice=%s text[:24]=%r len=%d",
+                        _voice_name, _text_key[:24], int(full_prompt_embeds.shape[1])
+                    )
+                else:
+                    full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code = (
+                        self._build_prompt_embeds(task_type=task_type, info_dict=info_dict)
+                    )
+                    self._prompt_embeds_cache[_cache_key] = (
+                        full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code
+                    )
+                    if len(self._prompt_embeds_cache) > self._prompt_embeds_cache_max:
+                        self._prompt_embeds_cache.popitem(last=False)
+                    logger.debug(
+                        "[talker.preprocess] prompt_embeds cache MISS for voice=%s text[:24]=%r (size=%d)",
+                        _voice_name, _text_key[:24], len(self._prompt_embeds_cache),
+                    )
+                # Keep full prompt embeddings on GPU (single-chunk prefill is
+                # by far the common case — for a ~200-token prompt with
+                # max_num_batched_tokens=4096 it always fits), so we skip
+                # the GPU→CPU stash + later CPU→GPU upcopy roundtrip.
+                # The subsequent-prefill path below still slices from this
+                # tensor (GPU slicing is free); only the take.to(...device)
+                # call changes from a real H→D copy to a no-op.
+                # For cache entries the tensor also stays on GPU across
+                # requests — the LRU cap + torch's caching allocator keep
+                # memory bounded.
+                prompt_embeds_cpu = full_prompt_embeds.detach().contiguous()
                 info_update: dict[str, Any] = {
                     "talker_prompt_embeds": prompt_embeds_cpu,
                     "tailing_text_hidden": tailing_text_hidden.detach(),
@@ -606,7 +653,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 take = prompt_embeds_cpu[s:e]
                 if int(take.shape[0]) < span_len:
                     pad_n = int(span_len - int(take.shape[0]))
-                    pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
+                    # Pad on the same device as `take` (now GPU for the
+                    # common prompt_embeds-on-GPU case; still works if a
+                    # legacy path hands us a CPU tensor).
+                    pad_rows = tts_pad_embed.reshape(1, -1).to(device=take.device).expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
                 prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
                 info_update["talker_prefill_offset"] = int(offset + span_len)
@@ -622,7 +672,10 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 take = prompt_embeds_cpu[s:e]
                 if int(take.shape[0]) < span_len:
                     pad_n = int(span_len - int(take.shape[0]))
-                    pad_rows = tts_pad_embed.reshape(1, -1).to("cpu").expand(pad_n, -1)
+                    # Pad on the same device as `take` (now GPU for the
+                    # common prompt_embeds-on-GPU case; still works if a
+                    # legacy path hands us a CPU tensor).
+                    pad_rows = tts_pad_embed.reshape(1, -1).to(device=take.device).expand(pad_n, -1)
                     take = torch.cat([take, pad_rows], dim=0)
                 prompt_embeds = take.to(device=input_ids.device, dtype=torch.bfloat16)
                 info_update = {"talker_prefill_offset": int(offset + span_len)}
