@@ -28,6 +28,15 @@ class OmniTensorPrefixCache:
     Note that feature_size may vary across multimodal_outputs.
     """
 
+    # Keys whose cached slot-indexed values cannot be reused across requests
+    # even when the input-token prefix matches. For Qwen3-TTS, `audio_codes`
+    # is the Talker's per-position emitted codec codes; under prefix_caching
+    # these were being spliced into new requests and producing semantically
+    # wrong audio (output durations/content didn't match the user's text).
+    # Keeping the slot KV prefix cache (hidden_states_cache + vLLM native KV)
+    # still gives the compute win; just don't replay cached output streams.
+    _MM_CACHE_DENYLIST: set[str] = {"audio_codes"}
+
     def __init__(
         self,
         num_blocks: int,
@@ -77,6 +86,7 @@ class OmniTensorPrefixCache:
                 and val.ndim >= 2
                 and val.shape[0] == seq_len
                 and key not in self.mm_cache_keys
+                and key not in OmniTensorPrefixCache._MM_CACHE_DENYLIST
             ):
                 feat_dim = val.shape[-1]
                 self.mm_outputs_cache[key] = self._get_cache_tensor(
