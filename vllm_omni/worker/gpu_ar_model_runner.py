@@ -832,7 +832,17 @@ class GPUARModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin):
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
-        hidden_states_cpu = hidden_states.detach().to("cpu").contiguous()
+        # hidden_states_cpu is ONLY consumed by _resolve_req_hidden_states
+        # when prefix cache is disabled (combined_hidden_states is None).
+        # With PC enabled the slice from the merged-states dict is returned
+        # instead. Skip the per-step GPU→CPU copy in that case — it was
+        # dead work and a real sync cost: the `.to("cpu").contiguous()`
+        # blocks until the forward completes, serializing the next engine
+        # step's prep behind it.
+        if self.omni_prefix_cache is None:
+            hidden_states_cpu = hidden_states.detach().to("cpu").contiguous()
+        else:
+            hidden_states_cpu = None
         num_scheduled_tokens_np = getattr(self, "_omni_num_scheduled_tokens_np", None)
         if num_scheduled_tokens_np is None:
             req_ids = self.input_batch.req_ids

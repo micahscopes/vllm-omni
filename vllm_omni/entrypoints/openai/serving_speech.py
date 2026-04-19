@@ -1151,6 +1151,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """
         prev_count = 0
         sample_rate_val = 24000
+        sample_rate_extracted = False
         first_chunk = True
 
         try:
@@ -1159,10 +1160,16 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                 if audio_key is None:
                     continue
 
-                sr_raw = audio_output.get("sr")
-                if sr_raw is not None:
-                    sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
-                    sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+                # Sample rate is invariant across a stream; extract only once
+                # to avoid a per-chunk `.item()` D→H sync on every emit.
+                if not sample_rate_extracted:
+                    sr_raw = audio_output.get("sr")
+                    if sr_raw is not None:
+                        sr_val = sr_raw[-1] if isinstance(sr_raw, list) and sr_raw else sr_raw
+                        sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
+                        sample_rate_extracted = True
+                else:
+                    sr_raw = audio_output.get("sr")  # still needed for WAV header assert
 
                 audio_val = audio_output[audio_key]
                 if isinstance(audio_val, list):
