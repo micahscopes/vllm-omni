@@ -571,6 +571,13 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             # (out-of-phase embeddings) on every request after the first
             # whenever enable_prefix_caching was on.
             num_computed_tokens = int(info_dict.get("num_computed_tokens", 0) or 0)
+            # DIAGNOSTIC: log prefix-cache-hit parameters so we can see at
+            # runtime whether the Talker actually gets num_computed > 0 on
+            # 2nd-and-subsequent requests with an identical prompt prefix.
+            logger.info(
+                "[talker.preprocess] req=%s span_len=%d num_computed=%d is_first_prefill=%s",
+                info_dict.get("request_id"), span_len, num_computed_tokens, is_first_prefill,
+            )
             if is_first_prefill:
                 full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code = (
                     self._build_prompt_embeds(task_type=task_type, info_dict=info_dict)
@@ -621,7 +628,12 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                 info_update = {"talker_prefill_offset": int(offset + span_len)}
                 info_update["codec_streaming"] = codec_streaming
 
-            # When inputs_embeds is set, token ids are ignored by the model but must stay in-vocab for vLLM bookkeeping.
+            # When inputs_embeds is set, token ids are ignored by the
+            # model but must stay in-vocab for vLLM bookkeeping. The
+            # per-text prefix-cache partitioning is now handled upstream
+            # in serving_speech.py's prompt construction (prompt_token_ids
+            # carries a text+voice hash), so we can freely fill a
+            # constant here without breaking cache correctness.
             input_ids_out = input_ids.clone()
             input_ids_out[:] = int(self.talker_config.codec_pad_id)
 

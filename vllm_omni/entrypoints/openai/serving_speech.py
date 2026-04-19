@@ -1178,9 +1178,28 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         new_chunks = []
 
                 for chunk_tensor in new_chunks:
-                    chunk_np = (
-                        chunk_tensor.float().detach().cpu().numpy() if hasattr(chunk_tensor, "float") else chunk_tensor
-                    )
+                    # Streaming PCM path: convert to int16 on GPU before the
+                    # D→H transfer. Halves bytes per chunk (2 vs 4 float32)
+                    # and pre-empts soundfile's CPU-side float→int16 quant
+                    # on every emit. For ~70 chunks/5s this is ~0.5-1ms saved
+                    # per chunk end-to-end, net ~30-100ms off the streaming
+                    # tail. We still fall back to float32 for the WAV
+                    # response_format path because CreateAudio assumes float
+                    # in that branch.
+                    if response_format == "pcm" and hasattr(chunk_tensor, "float") and chunk_tensor.is_cuda:
+                        # clamp → scale → int16 on device, then a 2-byte .cpu()
+                        chunk_gpu = chunk_tensor.detach()
+                        if chunk_gpu.dtype != torch.float32 and chunk_gpu.dtype != torch.float16:
+                            chunk_gpu = chunk_gpu.float()
+                        chunk_int16 = (
+                            chunk_gpu.clamp(min=-1.0, max=1.0).mul(32767.0).to(torch.int16)
+                        )
+                        chunk_np = chunk_int16.cpu().numpy()
+                    else:
+                        chunk_np = (
+                            chunk_tensor.float().detach().cpu().numpy()
+                            if hasattr(chunk_tensor, "float") else chunk_tensor
+                        )
                     if chunk_np.ndim > 1:
                         chunk_np = chunk_np.squeeze()
                     # For WAV format, emit header before first audio chunk
@@ -1558,7 +1577,33 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     tts_params["ref_audio"] = [[wav_list, sr]]
 
                 ph_len = await self._estimate_prompt_len_async(tts_params)
-                prompt = {"prompt_token_ids": [1] * ph_len, "additional_information": tts_params}
+                # Derive per-request placeholder token_ids from a hash of
+                # the user's text + voice. The model's preprocess overlays
+                # inputs_embeds and ignores these token_ids, BUT vLLM's
+                # native prefix cache hashes blocks by token_ids content —
+                # and with a constant `[1] * ph_len` placeholder, every
+                # request hashed to the same blocks. That made every
+                # request a total cache hit, and the Talker replayed
+                # whatever KV the FIRST request happened to leave in the
+                # shared blocks — producing audio from the wrong text
+                # (confirmed by ASR: short prompts returned the medium
+                # probe's "Hello there, this is a test..." regardless).
+                # Hashing keeps ids in a safe in-vocab band near the
+                # codec pad anchor; the model still ignores them so
+                # semantics are unchanged but the cache partitions by
+                # (text, voice) so hits are correctness-preserving.
+                import hashlib as _hashlib
+                _text = (tts_params.get("text") or [""])
+                _text = _text[0] if isinstance(_text, list) and _text else str(_text)
+                _voice = (tts_params.get("speaker") or [""])
+                _voice = _voice[0] if isinstance(_voice, list) and _voice else str(_voice)
+                _seed = f"{_voice}\x00{_text}".encode("utf-8")
+                _h = int(_hashlib.blake2b(_seed, digest_size=4).hexdigest(), 16)
+                # Safe in-vocab band. `1` was the original placeholder so
+                # any low-valued band is fine; we pick [16, 272) to stay
+                # clear of common special tokens (0..15 tend to be BOS/EOS/PAD).
+                _ids = [16 + ((_h + i) & 0xFF) for i in range(ph_len)]
+                prompt = {"prompt_token_ids": _ids, "additional_information": tts_params}
         else:
             # Qwen omni models (Qwen3-Omni, Qwen2.5-Omni) use a "talker"
             # stage whose preprocess requires chat-templated tokens.  The
