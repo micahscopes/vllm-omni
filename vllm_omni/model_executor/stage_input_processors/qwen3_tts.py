@@ -122,7 +122,14 @@ def _extract_last_frame(pooling_output: dict[str, Any]) -> torch.Tensor | None:
         return None
     if audio_codes.ndim == 2:
         frame = audio_codes[-1]
-        if frame.numel() == 0 or not bool(frame.any().item()):
+        # Metadata-only check: skip the per-frame `frame.any().item()` D→H
+        # sync. On GB10 that sync forces every Talker AR step to wait on the
+        # GPU stream, adding ~1-3ms per codec frame (~60-90ms/s of audio).
+        # Code2Wav already handles empty / malformed frames downstream
+        # (qwen3_tts_code2wav.py:252 skips n=0 and non-divisible lengths),
+        # so the zero-check was defensive and its sync cost outweighed its
+        # value in the voice-agent hot path.
+        if frame.numel() == 0:
             return None
         return frame.to(torch.long).reshape(-1)
     if audio_codes.ndim == 1:
