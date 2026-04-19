@@ -236,6 +236,18 @@ class AsyncOmni(EngineClient, OmniBase):
 
             # PD disaggregation: modify prefill-stage sampling params per request
             req_sp_list = list(sampling_params_list)
+
+            # Ensure all stages are delta stages; this is important to ensure
+            # that we don't redundantly emit multimodal outputs in later stages
+            for idx in range(len(req_sp_list)):
+                sp = req_sp_list[idx]
+                if isinstance(sp, SamplingParams):
+                    if not sp.skip_clone:
+                        sp = sp.clone()
+                        sp.skip_clone = True
+                        req_sp_list[idx] = sp
+                    sp.output_kind = RequestOutputKind.DELTA
+
             pd_pair = self._get_pd_separation_pair()
             if pd_pair is not None:
                 p_id = pd_pair[0]
@@ -249,12 +261,6 @@ class AsyncOmni(EngineClient, OmniBase):
                     input_stream=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id_for_e2e,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    data_parallel_rank=data_parallel_rank,
-                    reasoning_ended=reasoning_ended,
                 )
             else:
                 await self.engine.add_request_async(
@@ -262,12 +268,6 @@ class AsyncOmni(EngineClient, OmniBase):
                     prompt=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id_for_e2e,
-                    lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    data_parallel_rank=data_parallel_rank,
-                    reasoning_ended=reasoning_ended,
                 )
             submit_ts = time.time()
             req_state.metrics.stage_first_ts[0] = submit_ts
@@ -308,12 +308,6 @@ class AsyncOmni(EngineClient, OmniBase):
         input_stream: AsyncGenerator[StreamingInput, None],
         sampling_params_list: Sequence[OmniSamplingParams],
         final_stage_id: int,
-        lora_request: Any = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
-        trace_headers: Mapping[str, str] | None = None,
-        priority: int = 0,
-        data_parallel_rank: int | None = None,
-        reasoning_ended: bool | None = None,
     ) -> asyncio.Task:
         """Submit a streaming input generator as incremental stage-0 updates."""
         if not sampling_params_list:
@@ -321,14 +315,7 @@ class AsyncOmni(EngineClient, OmniBase):
         # only check thinker's sampling params now
         stage0_params = sampling_params_list[0]
         self._validate_streaming_input_sampling_params(stage0_params)
-
         req_state = self.request_states[request_id]
-
-        if not stage0_params.skip_clone:
-            stage0_params = stage0_params.clone()
-            stage0_params.skip_clone = True
-        stage0_params.output_kind = RequestOutputKind.DELTA
-
         has_submitted_first_chunk = False
 
         async def handle_inputs() -> None:
@@ -350,12 +337,6 @@ class AsyncOmni(EngineClient, OmniBase):
                             prompt_text=prompt_text,
                             sampling_params_list=chunk_sampling_params_list,
                             final_stage_id=final_stage_id,
-                            lora_request=lora_request,
-                            tokenization_kwargs=tokenization_kwargs,
-                            trace_headers=trace_headers,
-                            priority=priority,
-                            data_parallel_rank=data_parallel_rank,
-                            reasoning_ended=reasoning_ended,
                             resumable=True,
                         )
                         has_submitted_first_chunk = True
@@ -408,12 +389,12 @@ class AsyncOmni(EngineClient, OmniBase):
         if (
             not isinstance(params, SamplingParams)
             or params.n > 1
-            or params.output_kind == RequestOutputKind.FINAL_ONLY
+            or params.output_kind != RequestOutputKind.DELTA
             or params.stop
         ):
             raise ValueError(
                 "Input streaming is currently supported only for SamplingParams "
-                "with n == 1, output_kind != FINAL_ONLY, and without stop strings."
+                "with n == 1, output_kind == DELTA, and without stop strings."
             )
 
     async def encode(

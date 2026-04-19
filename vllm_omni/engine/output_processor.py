@@ -37,7 +37,7 @@ class OmniRequestState(RequestState):
         super().__init__(*args, **kwargs)
         # Omni-specific: multimodal output accumulation
         self.mm_type: str | None = None
-        self.mm_accumulated: dict[str, Any] | None = None
+        self.mm_accumulated: dict[str, Any] = {}
 
     def add_multimodal_tensor(self, payload: Any | None, mm_type: str | None) -> None:
         if payload is None:
@@ -77,7 +77,7 @@ class OmniRequestState(RequestState):
                 key = self.mm_type or "hidden"
                 incoming = {key: _to_cpu(payload)}
 
-            if self.mm_accumulated is None:
+            if not self.mm_accumulated:
                 self.mm_accumulated = incoming
             else:
                 # Merge keys; accumulate tensors in lists for deferred concatenation
@@ -111,12 +111,14 @@ class OmniRequestState(RequestState):
 
     def _consolidate_multimodal_tensors(self) -> None:
         """Consolidate accumulated tensor lists into single tensors via concatenation."""
-        if self.mm_accumulated is None:
+        if not self.mm_accumulated:
             return
         try:
             for k, v in self.mm_accumulated.items():
                 if isinstance(v, list) and v and isinstance(v[0], torch.Tensor):
                     try:
+                        # TODO (Alex) - this behavior should be consistent with what we see with
+                        # delta messages in streaming and not have special handling for magic keys
                         if k == "audio":
                             # Concatenate delta audio chunks (1-D) into the full waveform.
                             # Each entry is a per-step slice; flatten to -1 so chunks with
@@ -186,8 +188,8 @@ class OmniRequestState(RequestState):
         if not finished and final_only:
             return None
 
-        # Consolidate accumulated tensors when finishing.
-        if finished:
+        # Consolidate accumulated tensors when finishing as long as it's not a delta message
+        if finished and self.output_kind != RequestOutputKind.DELTA:
             self._consolidate_multimodal_tensors()
 
         if self.stream_interval > 1:
@@ -232,18 +234,22 @@ class OmniRequestState(RequestState):
     ) -> Any:
         # Reuse base text/logprobs logic, then annotate with pooling_result.
         base_output = super()._new_completion_output(token_ids, finish_reason, stop_reason, routed_experts)
-        try:
-            if not hasattr(base_output, "multimodal_output"):
-                setattr(base_output, "multimodal_output", {})
-            if self.mm_accumulated is not None:
-                mm_out = getattr(base_output, "multimodal_output")
-                if isinstance(mm_out, dict):
-                    for k, v in self.mm_accumulated.items():
-                        mm_out[k] = v
-                else:
-                    setattr(base_output, "multimodal_output", self.mm_accumulated)
-        except Exception:
-            logger.exception("Error in _new_completion_output")
+        is_delta = self.output_kind == RequestOutputKind.DELTA
+
+        if not hasattr(base_output, "multimodal_output"):
+            setattr(base_output, "multimodal_output", {})
+        if self.mm_accumulated:
+            mm_out = getattr(base_output, "multimodal_output")
+            if isinstance(mm_out, dict):
+                for k, v in self.mm_accumulated.items():
+                    mm_out[k] = v
+            else:
+                setattr(base_output, "multimodal_output", self.mm_accumulated)
+
+        # If it's a delta, we need to reset the mm accumulated data to avoid re-emitting it
+        if is_delta:
+            self.mm_accumulated = {}
+
         return base_output
 
 
