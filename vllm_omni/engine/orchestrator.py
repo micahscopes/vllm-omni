@@ -160,13 +160,28 @@ class Orchestrator:
         self._agg_total_tokens: list[int] = [0] * self.num_stages
         self._agg_total_gen_time_ms: list[float] = [0.0] * self.num_stages
 
-        # Shutdown coordination
-        self._shutdown_event = asyncio.Event()
+        # Shutdown coordination. The asyncio.Event is deferred until run()
+        # runs on the orchestrator's own event loop. asyncio.Event binds
+        # to whichever loop first `await`s it — and Orchestrator runs in
+        # a dedicated thread loop (see AsyncOmniEngine._bootstrap_orchestrator),
+        # so if we instantiated the Event here in __init__ (called from
+        # the main API server loop) and later did `await event.wait()`
+        # from the orchestrator loop, janus-style "bound to a different
+        # event loop" errors would surface on the first diffusion-stage-
+        # only pass. Lazy-init inside run() keeps the binding clean.
+        #
+        # `.set()` and `.is_set()` are synchronous and do NOT bind, so
+        # external callers that just flip the flag keep working even if
+        # they're on the main loop.
+        self._shutdown_event: asyncio.Event | None = None
         self._stages_shutdown = False
 
     async def run(self) -> None:
         """Main entry point for the Orchestrator event loop."""
         logger.info("[Orchestrator] Starting event loop")
+
+        # Bind the shutdown event to this (orchestrator) loop.
+        self._shutdown_event = asyncio.Event()
 
         request_task = asyncio.create_task(self._request_handler(), name="orchestrator-request-handler")
         output_task = asyncio.create_task(
