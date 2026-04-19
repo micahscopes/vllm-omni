@@ -1568,7 +1568,15 @@ class AsyncOmniEngine:
             return None
 
     async def try_get_output_async(self) -> dict[str, Any] | None:
-        """Async read from the Orchestrator output queue."""
+        """Async read from the Orchestrator output queue.
+
+        Kept using `sync_q.get_nowait()` intentionally — janus.Queue's
+        async_q is single-loop-bound on first use, and the orchestrator
+        runs on its own dedicated event loop (see `_bootstrap_orchestrator`).
+        Using async_q from the main API server loop poisons the binding
+        and the orchestrator loop's next `async_q.put()` dies with
+        `RuntimeError: ... is bound to a different event loop`.
+        """
         if self.output_queue is None:
             return None
         try:
