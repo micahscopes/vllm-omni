@@ -1136,17 +1136,10 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """Generate audio chunks for streaming response.
 
         Handles two audio output modes from the engine:
-        - Cumulative-list mode: Engine returns growing list of tensors where each
-          list entry is the FULL audio so far (cumulative snapshot), not a delta.
-          We emit only the samples beyond what we've already emitted.
-        - Per-step mode (tensor): Engine returns a single tensor per iteration;
-          we emit it directly as a delta.
-
-        The cumulative-list handling was previously emitting `audio_val[prev_count:]`
-        which took the delta of the LIST but not of the tensors' CONTENTS — each
-        emitted tensor still contained all audio from prior steps, so the client
-        received 1+2+3+...+N cumulative snapshots for N steps of generation,
-        producing 2-3× the intended audio duration in the stream.
+        - Cumulative mode (list): Engine returns growing list of chunks;
+        we emit only the new tail on each iteration.
+        - Per-step mode (tensor): Engine returns single tensor per iteration;
+        we emit it directly.
 
         Args:
             generator: Async generator from the engine
@@ -1157,7 +1150,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             Raw audio bytes for each chunk (with WAV header for first chunk if wav format)
         """
         prev_count = 0
-        prev_samples = 0  # samples already emitted from the latest cumulative snapshot
         sample_rate_val = 24000
         first_chunk = True
 
@@ -1173,27 +1165,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     sample_rate_val = sr_val.item() if hasattr(sr_val, "item") else int(sr_val)
 
                 audio_val = audio_output[audio_key]
-                new_chunks = []
                 if isinstance(audio_val, list):
-                    # Cumulative-list mode: each entry is the full audio so far.
-                    # Take the latest entry and emit only the samples beyond prev_samples.
-                    if audio_val:
-                        latest = audio_val[-1]
-                        if hasattr(latest, "numel"):
-                            cur_samples = int(latest.numel())
-                            if cur_samples > prev_samples:
-                                flat = latest.reshape(-1) if getattr(latest, "ndim", 1) > 1 else latest
-                                new_chunks = [flat[prev_samples:]]
-                                prev_samples = cur_samples
-                        else:
-                            # Non-tensor entries — fall back to old list-index behavior.
-                            new_chunks = audio_val[prev_count:]
+                    # Cumulative mode: each update grows the list; emit only new tail.
+                    new_chunks = audio_val[prev_count:]
                     prev_count = len(audio_val)
                 else:
-                    # Per-step mode: each update is a single tensor; emit directly as delta.
+                    # Per-step mode: each update is a single tensor; emit directly.
                     if audio_val is not None:
                         new_chunks = [audio_val]
                         prev_count += 1
+                    else:
+                        new_chunks = []
 
                 for chunk_tensor in new_chunks:
                     chunk_np = (
