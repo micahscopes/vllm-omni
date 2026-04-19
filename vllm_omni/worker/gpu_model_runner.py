@@ -1279,6 +1279,15 @@ class OmniGPUModelRunner(GPUModelRunner):
 
                 # call the custom process function
                 req_infos["request_id"] = req_id
+                # Plumb num_computed_tokens so prefix-cache-aware preprocess
+                # hooks (e.g. Qwen3-TTS Talker's prompt_embeds slicer) can
+                # align their slice with the positions vLLM's KV scheduler
+                # actually wants us to compute. Without this, on a prefix
+                # cache hit the scheduler gives us span_len = prompt_len -
+                # num_computed tokens but preprocess still reads from
+                # position 0 — the embeddings end up num_computed positions
+                # out of phase with KV/RoPE and the model decodes garbage.
+                req_infos["num_computed_tokens"] = int(self.input_batch.num_computed_tokens_cpu[req_index])
                 embed_slice = inputs_embeds[s:e] if inputs_embeds is not None else None
                 req_input_ids, req_embeds, update_dict = self.model.preprocess(
                     input_ids=input_ids[s:e], input_embeds=embed_slice, **req_infos

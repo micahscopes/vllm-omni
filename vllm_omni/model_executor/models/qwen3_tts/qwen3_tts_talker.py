@@ -562,6 +562,15 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
             # First prefill round: prompt_embeds_cpu is not yet populated.
             # Subsequent prefill rounds (multi-chunk): prompt_embeds_cpu is a Tensor stored by the first round.
             is_first_prefill = not isinstance(prompt_embeds_cpu, torch.Tensor) or prompt_embeds_cpu.ndim != 2
+            # num_computed_tokens is plumbed from the runner. When vLLM's
+            # native KV prefix cache hits, the scheduler only gives us
+            # span_len = prompt_len - num_computed tokens — we still need to
+            # embed positions [num_computed .. num_computed + span_len) so
+            # the new embeddings line up with the cached KV/RoPE positions.
+            # Historically this read 0, which produced subtly-wrong audio
+            # (out-of-phase embeddings) on every request after the first
+            # whenever enable_prefix_caching was on.
+            num_computed_tokens = int(info_dict.get("num_computed_tokens", 0) or 0)
             if is_first_prefill:
                 full_prompt_embeds, tailing_text_hidden, tts_pad_embed, ref_code_len, ref_code = (
                     self._build_prompt_embeds(task_type=task_type, info_dict=info_dict)
@@ -580,11 +589,13 @@ class Qwen3TTSTalkerForConditionalGeneration(nn.Module):
                     info_update["ref_code"] = ref_code.detach().to("cpu").contiguous()
                 if ref_code_len is not None:
                     info_update["ref_code_len"] = int(ref_code_len)
-                # Always return a span_len slice; if the scheduled placeholder is longer, pad with tts_pad_embed.
-                # This preserves placeholder/embedding alignment.
-                offset = 0
-                s = 0
-                e = span_len
+                # Prefix-cache-aware slicing: start from num_computed_tokens
+                # so the embedding window aligns with the span vLLM actually
+                # scheduled. Pad with tts_pad_embed if the stored prompt
+                # tensor was shorter than (num_computed + span_len).
+                offset = max(0, min(num_computed_tokens, int(prompt_embeds_cpu.shape[0])))
+                s = offset
+                e = max(offset, min(offset + span_len, int(prompt_embeds_cpu.shape[0])))
                 take = prompt_embeds_cpu[s:e]
                 if int(take.shape[0]) < span_len:
                     pad_n = int(span_len - int(take.shape[0]))
