@@ -1,7 +1,14 @@
 import sys
 from functools import cached_property
 
+import torch
 from aenum import extend_enum
+
+# Enable TF32 matmul precision at import time. Equivalent to faster-qwen3-tts's
+# c42458b ("qwen-tts: add TF32 matmul precision to cli.py"). Harmless on non-TF32
+# paths; measurable win on bf16/fp32 Linear on Ampere+/Blackwell (per-layer ~5-15%).
+# Upstream-shaped — no hardware gating needed.
+torch.set_float32_matmul_precision("high")
 from vllm.config import ModelConfig as _OriginalModelConfig
 from vllm.inputs import TokensPrompt as _OriginalTokensPrompt
 from vllm.model_executor.layers.rotary_embedding import (
