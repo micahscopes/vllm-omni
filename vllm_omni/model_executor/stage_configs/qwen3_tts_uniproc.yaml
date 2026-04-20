@@ -87,6 +87,9 @@ runtime:
         # Match the decoder sliding attention window to avoid chunk-boundary noise.
         codec_chunk_frames: 25
         codec_left_context_frames: 72
+        # Cap ref_code prepend at the transformer's sliding window; larger
+        # values inflate vocoder work with no correctness benefit. 0 disables.
+        codec_ref_code_max_frames: 72
 
   edges:
     - from: 0

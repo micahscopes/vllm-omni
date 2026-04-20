@@ -19,6 +19,39 @@ from vllm_omni.model_executor.stage_input_processors.tts_utils import (
 logger = init_logger(__name__)
 
 
+def _bounded_ref_prefix(
+    ref_code: torch.Tensor,
+    existing_left_context: int,
+    ref_code_max_frames: int,
+) -> torch.Tensor:
+    """Return a tail slice of ref_code sized to fit the decoder's left-context budget.
+
+    The Code2Wav decoder's transformer uses sliding-window attention (window = 72
+    frames for qwen3-tts v2), and its causal CNN stack has a bounded receptive
+    field. ``codec_left_context_frames`` in the streaming config is pinned to
+    match the sliding window, so any left context beyond that is redundant for
+    correctness — but adding it linearly inflates vocoder work because the CNN
+    upsample stack runs over every frame before the ctx-trim slice at the output.
+
+    ``ref_code_max_frames`` is the maximum number of LEFT-CONTEXT frames allowed
+    before the chunk's ``context_length`` (i.e. the "new" portion). If the window
+    already carries ``existing_left_context`` frames from prior streamed chunks,
+    we prepend only the remaining shortfall from the tail of ref_code (tail,
+    because the most recent frames of the reference are the most semantically
+    relevant to the upcoming synthesis). Set ``ref_code_max_frames=0`` to keep
+    the legacy unbounded prepend.
+    """
+    if ref_code_max_frames <= 0:
+        return ref_code
+    shortfall = ref_code_max_frames - max(0, existing_left_context)
+    if shortfall <= 0:
+        # Left context from prior real chunks already covers the window.
+        return ref_code.new_zeros((0, ref_code.shape[1]))
+    if shortfall >= int(ref_code.shape[0]):
+        return ref_code
+    return ref_code[-shortfall:]
+
+
 def talker2code2wav(
     stage_list: list[Any],
     engine_input_source: list[int],
@@ -28,6 +61,15 @@ def talker2code2wav(
     """Non-async: collect all talker codes, then pass to code2wav at once."""
     from vllm_omni.inputs.data import OmniTokensPrompt
     from vllm_omni.model_executor.stage_input_processors.qwen3_omni import _validate_stage_inputs
+
+    # Non-streaming path runs the decoder once over the FULL code sequence, so
+    # the transformer's sliding window will always see the end of ref_code at
+    # some synthesis step. Capping here saves vocoder work for short utterances
+    # (the dominant share of streaming voice-agent traffic). ``0`` preserves
+    # legacy behavior. See ``_bounded_ref_prefix`` for rationale.
+    # Exposed via future pipeline-yaml knob ``codec_ref_code_max_frames``;
+    # 0 (disabled) chosen as a safe default for the non-streaming path.
+    _NONSTREAM_REF_CAP = 0
 
     talker_outputs = _validate_stage_inputs(stage_list, engine_input_source)
     code2wav_inputs: list[OmniTokensPrompt] = []
@@ -87,8 +129,16 @@ def talker2code2wav(
             if not isinstance(ref_code, torch.Tensor):
                 ref_code_len = 0
             else:
-                ref_code_len = int(ref_code.shape[0])
-                audio_codes = torch.cat([ref_code.to(audio_codes.device), audio_codes], dim=0)
+                # Non-streaming bounded prefix: `existing_left_context=0` because
+                # the full code sequence is passed in a single decoder call.
+                bounded_ref = _bounded_ref_prefix(
+                    ref_code,
+                    existing_left_context=0,
+                    ref_code_max_frames=_NONSTREAM_REF_CAP,
+                )
+                ref_code_len = int(bounded_ref.shape[0])
+                if ref_code_len > 0:
+                    audio_codes = torch.cat([bounded_ref.to(audio_codes.device), audio_codes], dim=0)
         else:
             ref_code_len = 0
         # Code2Wav expects codebook-major flat: [Q*num_frames]
@@ -166,6 +216,14 @@ def talker2code2wav_async_chunk(
     cfg = raw_cfg.get("extra", raw_cfg) if isinstance(raw_cfg, dict) else {}
     chunk_size = int(cfg.get("codec_chunk_frames", 25))
     left_context_size_config = int(cfg.get("codec_left_context_frames", 25))
+    # Cap ref_code prepend at this many LEFT-CONTEXT frames. Default = the
+    # same budget as ``codec_left_context_frames`` (which in turn is pinned
+    # to the decoder's transformer sliding_window, 72 for qwen3-tts v2).
+    # Any larger value is wasted decoder work — the transformer window can't
+    # attend past ``sliding_window`` frames and the causal CNN stack's
+    # receptive field is smaller still. Set to 0 to restore the pre-fix
+    # behavior (unbounded ref_code prepend on every chunk).
+    ref_code_max_frames = int(cfg.get("codec_ref_code_max_frames", left_context_size_config))
 
     # Per-request override takes priority over dynamic IC.
     per_request_override = False
@@ -297,17 +355,64 @@ def talker2code2wav_async_chunk(
     left_context_size = max(0, end_index - context_length)
     window_frames = transfer_manager.code_prompt_token_ids[request_id][-end_index:]
 
-    # Prepend ref_code as decoder context for every chunk so the vocoder
-    # maintains voice-clone speaker identity throughout the stream.  The HF
-    # reference decodes ref_code + all_codes in one pass; without ref_code
-    # context on later chunks the decoder loses speaker identity and produces
-    # distorted audio.  Use `.get()` (not `.pop()`) to keep ref_code for
-    # subsequent chunks.
+    # Prepend the tail of ref_code as decoder left-context so the vocoder
+    # keeps voice-clone speaker identity. Two facts bound how much ref_code
+    # is actually useful:
+    #   1. The Code2Wav decoder's transformer uses sliding-window attention
+    #      (window = 72 frames). Anything past the window is invisible to
+    #      the transformer and can only affect the causal CNN stack.
+    #   2. The causal CNN receptive field is small (≤ kernel*layers, well
+    #      under 30 frames). ``codec_left_context_frames`` is already pinned
+    #      to cover both.
+    # Once real prior-chunk frames in the window meet the budget, ref_code
+    # is fully redundant and we drop it. ``codec_ref_code_max_frames=0``
+    # restores the legacy unbounded-prepend behavior.
+    #
+    # Correctness: we cache the truncated frame list per request (not per
+    # voice) because ``request_payload`` is already request-scoped and
+    # cleaned up by the transfer adapter on finish. The tail is the same
+    # across every chunk for a given request, so we compute it once.
     ref_code = request_payload.get(request_id)
     if isinstance(ref_code, torch.Tensor) and ref_code.numel() > 0:
-        ref_frames = ref_code.tolist()
-        window_frames = ref_frames + window_frames
-        left_context_size += len(ref_frames)
+        ref_tail_cache = getattr(transfer_manager, "_ref_code_tail_cache", None)
+        if ref_tail_cache is None:
+            ref_tail_cache = {}
+            transfer_manager._ref_code_tail_cache = ref_tail_cache
+        cache_entry = ref_tail_cache.get(request_id)
+        # Invalidate if the ref_code-max-frames budget changed mid-flight
+        # (config reload) or if ref_code contents differ (shouldn't happen
+        # but guards against a silent mismatch).
+        if (
+            cache_entry is None
+            or cache_entry.get("budget") != ref_code_max_frames
+            or cache_entry.get("ref_id") != id(ref_code)
+        ):
+            ref_tail_cache[request_id] = {
+                "budget": ref_code_max_frames,
+                "ref_id": id(ref_code),
+                # Cache the full tolist() once; we slice-from-tail below
+                # per chunk based on the current existing_left_context.
+                "full_tail": ref_code.tolist(),
+                "full_len": int(ref_code.shape[0]),
+            }
+            cache_entry = ref_tail_cache[request_id]
+
+        if ref_code_max_frames <= 0:
+            # Legacy: prepend full ref_code every chunk.
+            ref_frames = cache_entry["full_tail"]
+        else:
+            shortfall = ref_code_max_frames - max(0, left_context_size)
+            if shortfall <= 0:
+                ref_frames = []
+            elif shortfall >= cache_entry["full_len"]:
+                ref_frames = cache_entry["full_tail"]
+            else:
+                # Tail of the cached list. O(shortfall) slice (~72 ints of lists).
+                ref_frames = cache_entry["full_tail"][-shortfall:]
+
+        if ref_frames:
+            window_frames = ref_frames + window_frames
+            left_context_size += len(ref_frames)
 
     num_quantizers = len(window_frames[0])
     num_frames = len(window_frames)
