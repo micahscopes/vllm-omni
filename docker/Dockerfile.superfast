@@ -1,0 +1,44 @@
+# vllm-omni-superfast — vllm-omni with a local carry set of TTS perf patches
+# on top of any recent-enough stock vLLM base.
+#
+# The perf commits live on the fork's gx10-align branch (or whichever branch
+# holds the carry). They touch vllm-omni only; the base image's vLLM stays
+# as provided — vllm-omni's pyproject.toml intentionally excludes vllm from
+# its deps (comment: "entrypoints overwrite issue"), so this install does
+# NOT downgrade or replace the base's vllm.
+#
+# Build (from the vllm-omni fork root):
+#
+#   podman build -t vllm-omni-superfast:latest -f docker/Dockerfile.superfast .
+#
+# Override the base to ride an already-patched vLLM image on targets that
+# need it (e.g. a Blackwell-patched nightly):
+#
+#   podman build \
+#     --build-arg VLLM_BASE=<your-vllm-image>:latest \
+#     -t vllm-omni-superfast:latest -f docker/Dockerfile.superfast .
+
+ARG VLLM_BASE=vllm/vllm-openai:v0.19.0
+FROM ${VLLM_BASE}
+
+ARG SF_WORKDIR=/app
+WORKDIR ${SF_WORKDIR}
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git jq \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY . ${SF_WORKDIR}/vllm-omni
+
+RUN cd ${SF_WORKDIR}/vllm-omni \
+ && uv pip install --python "$(python3 -c 'import sys; print(sys.executable)')" \
+       --no-cache-dir "."
+
+# vllm-omni replaces the base's `vllm` CLI entrypoint — intentional. An empty
+# ENTRYPOINT lets the container take whatever command the base supported
+# (e.g. `vllm serve …`) now served by vllm-omni's dispatcher.
+ENTRYPOINT []
+
+LABEL org.opencontainers.image.title="vllm-omni-superfast" \
+      org.opencontainers.image.description="vllm-omni fork with TTS perf patches on top of a user-provided vLLM base." \
+      org.opencontainers.image.licenses="Apache-2.0"
