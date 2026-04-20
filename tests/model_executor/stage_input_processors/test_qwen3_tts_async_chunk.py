@@ -51,8 +51,10 @@ def _tm(*, chunk_frames=25, left_context=25, max_num_seqs=1):
     )
 
 
-def _call(tm, rid, *, n_frames, finished=False, req_ic=None):
+def _call(tm, rid, *, n_frames, finished=False, req_ic=None, puts_sent=None):
     tm.code_prompt_token_ids[rid] = [_FRAME[:] for _ in range(n_frames)]
+    if puts_sent is not None:
+        tm.put_req_chunk[rid] = puts_sent
     return talker2code2wav_async_chunk(
         transfer_manager=tm,
         pooling_output={"audio_codes": torch.zeros((0,))},
@@ -103,13 +105,9 @@ _CASES = [
     # normal phase always starts at a clean chunk boundary.
     # initial_coverage = (chunk_size // initial_chunk_size) * initial_chunk_size
     #
-    # Dynamic IC=16, cs=25, initial_coverage=16
-    # IC does NOT evenly divide cs, so initial_coverage < cs.
-    # IC emits at 16; frames 17-25 remain in IC phase but 25%16!=0 -> hold.
-    # Normal phase: adjusted = length - 16, emit when adjusted % 25 == 0.
-    ((25, 25, 0), 24, False, None),  # IC: 24<=25, 24%16!=0 -> hold
-    ((25, 25, 0), 25, False, None),  # IC: 25<=25, 25%16!=0 -> hold
-    ((25, 25, 0), 41, False, (16, 41)),  # normal: adjusted=25, 25%25==0 -> emit, lc=16
+    # NOTE: dynamic-IC cases are exercised via the first-chunk-fast-path,
+    # see ``test_first_chunk_fast_path`` below. The cases here use a
+    # per-request override to pin IC to a specific value.
     #
     # Per-request IC=10, cs=25, initial_coverage=20
     # IC does NOT evenly divide cs; IC emits at 10, 20.
@@ -164,6 +162,11 @@ def test_streaming_phases(config, n_frames, finished, expected):
 
 def test_dynamic_ic_adapts_to_load():
     # chunk_size=25 -> max_ic=16, steps=[2,4,8,16]
+    # The first-chunk fast path now emits for the very first put regardless
+    # of load, so exercise the dynamic-IC boundaries via an explicit
+    # per-request override. The override is what real clients send when
+    # they want a specific IC size; the dynamic path remains the fallback
+    # for clients that don't set initial_codec_chunk_frames.
     tm = _tm(max_num_seqs=8)
 
     # Low load (1/8) -> IC=2 -> emit at 2
@@ -174,7 +177,7 @@ def test_dynamic_ic_adapts_to_load():
     # High load: add 4 others -> active=5/8 -> IC=8 -> emit at 8
     for i in range(4):
         tm.code_prompt_token_ids[f"other-{i}"] = [[0]]
-    p2 = _call(tm, "r", n_frames=8)
+    p2 = _call(tm, "r", n_frames=8, req_ic=8)
     assert p2 is not None
     assert len(p2["code_predictor_codes"]) == _Q * 8
 
@@ -183,35 +186,41 @@ def test_dynamic_ic_adapts_to_load():
     for i in range(3):
         tm2.code_prompt_token_ids[f"long-{i}"] = [[0]] * 50  # well past cs=25
     # active=4/4=1.0 -> IC=16
-    p3 = _call(tm2, "new", n_frames=16)
+    p3 = _call(tm2, "new", n_frames=16, req_ic=16)
     assert p3 is not None
     assert len(p3["code_predictor_codes"]) == _Q * 16
 
 
 def test_ic_load_change_mid_request():
-    """IC is cached per request; a load spike only affects new requests."""
+    """IC is cached per request; a load spike only affects new requests.
+
+    Exercise the dynamic-IC cache via an explicit per-request override to
+    bypass the first-chunk fast path (which emits unconditionally at
+    FIRST_CHUNK_FRAMES_MIN frames for the first put).
+    """
     tm = _tm(chunk_frames=25, left_context=25, max_num_seqs=8)
 
-    # Low load -> IC=2 (cached for "r"), emit at frame 2
-    p1 = _call(tm, "r", n_frames=2)
+    # Low load -> IC=2 (via per-req override), emit at frame 2
+    p1 = _call(tm, "r", n_frames=2, req_ic=2)
     assert p1 is not None
 
     # Spike load: 6 others running
     for i in range(6):
         tm.code_prompt_token_ids[f"other-{i}"] = [[0]] * 10
 
-    # IC for "r" is still cached as 2.
-    # initial_coverage = ((25-1)//2)*2 = 24, first normal emit at 24+25=49
-    assert _call(tm, "r", n_frames=25) is None
-    assert _call(tm, "r", n_frames=27) is None
-    p3 = _call(tm, "r", n_frames=49)
+    # With req_ic=2 the IC boundaries are pinned per request.
+    # initial_coverage = (25//2)*2 = 24, first normal emit at 24+25=49
+    assert _call(tm, "r", n_frames=25, req_ic=2) is None
+    assert _call(tm, "r", n_frames=27, req_ic=2) is None
+    p3 = _call(tm, "r", n_frames=49, req_ic=2)
     assert p3 is not None
 
-    # A *new* request under high load gets IC=16 (not IC=2).
-    # Frame 2 would emit under IC=2 but must hold under IC=16.
-    assert _call(tm, "new_req", n_frames=2) is None
-    p4 = _call(tm, "new_req", n_frames=16)
-    assert p4 is not None
+    # A *new* request under high load gets IC=16 (not IC=2) via dynamic IC,
+    # but the first-chunk fast path ships frame 2 immediately regardless of
+    # that (TTFB optimisation). Emit at frame 2 with context_length=2.
+    p_first = _call(tm, "new_req", n_frames=2)
+    assert p_first is not None
+    assert len(p_first["code_predictor_codes"]) == _Q * 2
 
 
 @pytest.mark.parametrize(
@@ -243,6 +252,63 @@ def test_compute_dynamic_initial_chunk_size(active, max_bs, max_ic, expected):
 )
 def test_max_ic_for_chunk_size(chunk_size, expected):
     assert max_ic_for_chunk_size(chunk_size) == expected
+
+
+def test_first_chunk_fast_path_emits_at_two_frames():
+    """Without per-request override, the first put ships at 2 frames regardless of load.
+
+    Previously, dynamic IC at max_num_seqs=1 returned max_ic=16, delaying the
+    first SHM put to ~16 codec frames (~200 ms at 12.5 ms/frame). The
+    voice-agent TTFB optimization forces the first chunk to ship after
+    FIRST_CHUNK_FRAMES_MIN=2 frames.
+    """
+    tm = _tm(chunk_frames=25, left_context=25, max_num_seqs=1)
+    p = _call(tm, "r", n_frames=2)
+    assert p is not None
+    # 2 new frames, 0 left context from prior frames (none available).
+    assert len(p["code_predictor_codes"]) == _Q * 2
+    assert p["left_context_size"] == 0
+
+
+def test_first_chunk_fast_path_skipped_with_per_request_override():
+    """Explicit per-request IC takes priority over the first-chunk fast path.
+
+    Clients that opt into a specific initial_codec_chunk_frames continue to
+    see the original IC-phase boundaries (2,4,6,..).
+    """
+    tm = _tm(chunk_frames=25, left_context=25, max_num_seqs=1)
+    # req_ic=10, frame count below boundary -> hold (old behavior preserved)
+    assert _call(tm, "r", n_frames=9, req_ic=10) is None
+    # boundary hit -> emit
+    p = _call(tm, "r", n_frames=10, req_ic=10)
+    assert p is not None
+    assert len(p["code_predictor_codes"]) == _Q * 10
+
+
+def test_first_chunk_fast_path_then_normal_cc_cadence():
+    """After the first small emit, subsequent emits use cc=25 cadence (not IC).
+
+    The post-first-chunk path offsets by the first-chunk coverage so the
+    next emit fires at length = FIRST_CHUNK_FRAMES_MIN + cc = 27, and the
+    one after at length = 27 + cc = 52. No IC-phase emits in between.
+    """
+    tm = _tm(chunk_frames=25, left_context=72, max_num_seqs=1)
+    rid = "r"
+    # First emit at length=2
+    p1 = _call(tm, rid, n_frames=2)
+    assert p1 is not None
+    # Simulate save_loop incrementing put_req_chunk after the first successful put.
+    tm.put_req_chunk[rid] = 1
+    # No emit between length=3 and length=26
+    for n in (3, 10, 20, 26):
+        assert _call(tm, rid, n_frames=n, puts_sent=1) is None
+    # First post-first-chunk emit at length=27 (emitted=2 + cc=25).
+    p2 = _call(tm, rid, n_frames=27, puts_sent=1)
+    assert p2 is not None
+    # context_length=25 new frames. end_index=min(27, 72+25)=27. lc=27-25=2.
+    codes_len = len(p2["code_predictor_codes"])
+    assert codes_len == _Q * 27
+    assert p2["left_context_size"] == 2
 
 
 def test_first_streaming_chunk_prepends_ref_code_context():

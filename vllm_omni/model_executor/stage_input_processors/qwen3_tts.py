@@ -219,26 +219,79 @@ def talker2code2wav_async_chunk(
             }
         return None
 
-    in_initial_phase = initial_chunk_size > 0 and initial_chunk_size < chunk_size and length <= chunk_size
+    # TTFB-first-chunk fast path (voice-agent latency).
+    #
+    # The dynamic-IC branch returns `max_ic` (16 when cc=25) at max_num_seqs=1
+    # because load_factor = active/capacity = 1/1 = 1.0, which rounds to the
+    # largest step. That delays the very first SHM put to ~16 codec frames
+    # (~200 ms at 12.5 ms/frame). Voice agents need the first audio chunk out
+    # as early as possible.
+    #
+    # Force the first emit for any request to ship after FIRST_CHUNK_FRAMES_MIN
+    # frames (2 frames = ~25 ms). Track how many frames have been emitted so
+    # far so subsequent chunks use the standard cc=25 cadence without
+    # re-decoding the first-chunk frames. Uses `put_req_chunk` as the
+    # "has any put completed for this request" signal: the save_loop is
+    # sequential per-request so this is consistent with the emit state.
+    FIRST_CHUNK_FRAMES_MIN = 2
+    put_chunk_map = getattr(transfer_manager, "put_req_chunk", None)
+    puts_sent = int(put_chunk_map.get(request_id, 0)) if put_chunk_map is not None else 0
+    use_first_chunk_fast_path = (
+        puts_sent == 0
+        and not per_request_override
+        and chunk_size > FIRST_CHUNK_FRAMES_MIN
+        and initial_chunk_size > FIRST_CHUNK_FRAMES_MIN
+    )
 
-    if in_initial_phase:
-        # IC phase: emit every initial_chunk_size frames with growing left context.
-        if not finished and length % initial_chunk_size != 0:
+    emitted_cache = getattr(transfer_manager, "_emitted_frame_count", None)
+    if emitted_cache is None:
+        emitted_cache = {}
+        transfer_manager._emitted_frame_count = emitted_cache
+
+    if use_first_chunk_fast_path:
+        # Emit first chunk of FIRST_CHUNK_FRAMES_MIN frames as soon as available.
+        if not finished and length < FIRST_CHUNK_FRAMES_MIN:
             return None
-        context_length = (
-            length % initial_chunk_size if (finished and length % initial_chunk_size != 0) else initial_chunk_size
-        )
+        context_length = min(length, FIRST_CHUNK_FRAMES_MIN)
+    elif puts_sent > 0 and request_id in emitted_cache:
+        # Post-first-chunk path: skip IC phase (cc=25 cadence), offsetting by
+        # the first chunk's frame count so we don't re-emit those frames.
+        emitted = emitted_cache[request_id]
+        new_frames = length - emitted
+        if not finished and (new_frames <= 0 or new_frames % chunk_size != 0):
+            return None
+        if not finished:
+            context_length = chunk_size
+        else:
+            if new_frames <= 0:
+                # No new frames but flushing finished -> emit EOF marker only.
+                return {
+                    "code_predictor_codes": [],
+                    "finished": True,
+                }
+            # Finished flush: emit remainder as a single chunk.
+            context_length = new_frames
     else:
-        # Normal phase: offset so the first normal emit picks up after IC phase.
-        # IC is stateless (may change with load); any mismatch is absorbed by left_context.
-        initial_coverage = (
-            (chunk_size // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
-        )
-        adjusted = length - initial_coverage
-        if not finished and adjusted % chunk_size != 0:
-            return None
-        chunk_length = adjusted % chunk_size
-        context_length = chunk_length if chunk_length != 0 else chunk_size
+        in_initial_phase = initial_chunk_size > 0 and initial_chunk_size < chunk_size and length <= chunk_size
+
+        if in_initial_phase:
+            # IC phase: emit every initial_chunk_size frames with growing left context.
+            if not finished and length % initial_chunk_size != 0:
+                return None
+            context_length = (
+                length % initial_chunk_size if (finished and length % initial_chunk_size != 0) else initial_chunk_size
+            )
+        else:
+            # Normal phase: offset so the first normal emit picks up after IC phase.
+            # IC is stateless (may change with load); any mismatch is absorbed by left_context.
+            initial_coverage = (
+                (chunk_size // initial_chunk_size) * initial_chunk_size if 0 < initial_chunk_size < chunk_size else 0
+            )
+            adjusted = length - initial_coverage
+            if not finished and adjusted % chunk_size != 0:
+                return None
+            chunk_length = adjusted % chunk_size
+            context_length = chunk_length if chunk_length != 0 else chunk_size
 
     end_index = min(length, left_context_size_config + context_length)
     left_context_size = max(0, end_index - context_length)
@@ -265,6 +318,13 @@ def talker2code2wav_async_chunk(
         "left_context_size": left_context_size,
         "finished": finished,
     }
+    # Update emitted-frame-count state so the post-first-chunk path can
+    # compute `new_frames = length - emitted` on subsequent calls.
+    # Only tracked when the fast-path is active (no per_request_override).
+    if use_first_chunk_fast_path:
+        emitted_cache[request_id] = context_length
+    elif puts_sent > 0 and request_id in emitted_cache:
+        emitted_cache[request_id] += context_length
     # Propagate speaker and language from the request so they are available
     # as runtime_additional_information in subsequent pipeline stages, consistent
     # with qwen3-omni and qwen2.5-omni stage input processors.

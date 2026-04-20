@@ -261,6 +261,9 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             cached_ic = getattr(self, "_cached_ic", None)
             if cached_ic is not None:
                 cached_ic.pop(external_req_id, None)
+            emitted_cache = getattr(self, "_emitted_frame_count", None)
+            if emitted_cache is not None:
+                emitted_cache.pop(external_req_id, None)
 
     ########################################################################
     # Cleanup
@@ -299,6 +302,14 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
         cached_ic = getattr(self, "_cached_ic", None)
         if cached_ic is not None:
             cached_ic.pop(external_req_id, None)
+
+        # qwen3_tts.talker2code2wav_async_chunk tracks per-request frames
+        # emitted to compute the post-first-chunk offset.  Drop it alongside
+        # the rest of the sender state so long-running servers don't accumulate
+        # stale entries.
+        emitted_cache = getattr(self, "_emitted_frame_count", None)
+        if emitted_cache is not None:
+            emitted_cache.pop(external_req_id, None)
 
     def cleanup(
         self,
