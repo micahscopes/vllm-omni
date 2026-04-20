@@ -9,6 +9,7 @@ from typing import Any
 from vllm_omni.entrypoints.stage_utils import shm_read_bytes, shm_write_bytes
 
 from ..utils.logging import get_connector_logger
+from ..utils.notify import NotifySender
 from .base import OmniConnectorBase
 from .shm_ring import (
     DEFAULT_NUM_SLOTS,
@@ -59,6 +60,11 @@ class SharedMemoryConnector(OmniConnectorBase):
             "ring_reads": 0,
             "ring_fallbacks": 0,
         }
+        # Lazy per-directed-edge NotifySender cache. Keyed by
+        # (from_stage, to_stage). Senders are cheap AF_UNIX DGRAM fds.
+        # Receivers are bound by the OmniTransferAdapterBase; this
+        # connector only ever sends.
+        self._notify_senders: dict[tuple[str, str], NotifySender] = {}
 
     def _get_ring(self, from_stage: str, to_stage: str) -> RingBuffer | None:
         """Return an attached ring for this edge, or ``None`` if ring is
@@ -144,11 +150,24 @@ class SharedMemoryConnector(OmniConnectorBase):
             self._metrics["puts"] += 1
             self._metrics["bytes_transferred"] += size
 
+            # Wake the receiver's recv_loop immediately instead of waiting
+            # for its 1ms poll to trip. Any failure here is swallowed by
+            # NotifySender (polling remains the fallback).
+            self._notify(from_stage, to_stage)
+
             return True, size, metadata
 
         except Exception as e:
             logger.error(f"SharedMemoryConnector put failed for req {put_key}: {e}")
             return False, 0, None
+
+    def _notify(self, from_stage: str, to_stage: str) -> None:
+        key = (str(from_stage), str(to_stage))
+        sender = self._notify_senders.get(key)
+        if sender is None:
+            sender = NotifySender(from_stage, to_stage)
+            self._notify_senders[key] = sender
+        sender.send()
 
     def _get_data_with_lock(self, lock_file: str, shm_handle: dict):
         obj = None
@@ -314,6 +333,9 @@ class SharedMemoryConnector(OmniConnectorBase):
                 except OSError:
                     pass
         self._pending_keys.clear()
+        for sender in self._notify_senders.values():
+            sender.close()
+        self._notify_senders.clear()
 
         # Close (and, if we own them, unlink) the per-edge rings.
         for edge, ring in list(self._rings.items()):

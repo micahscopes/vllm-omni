@@ -97,8 +97,7 @@ class OmniChunkTransferAdapter(OmniTransferAdapterBase):
             request.additional_information = None
         self._cancelled_load_reqs.discard(request.request_id)
         self._pending_load_reqs.append(request)
-        with self._recv_cond:
-            self._recv_cond.notify()
+        self._wake_recv_loop()
 
     def save_async(
         self,
