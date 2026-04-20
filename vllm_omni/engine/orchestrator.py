@@ -356,11 +356,25 @@ class Orchestrator:
                     if raw_outputs is None:
                         continue
 
+                    _trace_t_poll_ret = _time.time()
+                    _trace_first_ids = [getattr(o, "request_id", None) for o in getattr(raw_outputs, "outputs", [])][:3]
+                    logger.info(
+                        "[TTFB_TRACE] stage-%d poll_returned req_ids=%s t=%.6f",
+                        stage_id, _trace_first_ids, _trace_t_poll_ret,
+                    )
+
                     # Handle prefill-finished KV-ready signals before finished outputs.
                     await self._handle_kv_ready_raw_outputs(stage_id, raw_outputs)
 
                     # Process raw outputs through the output processor
                     request_outputs = await self._process_stage_outputs(stage_id, raw_outputs)
+
+                    _trace_t_proc_done = _time.time()
+                    logger.info(
+                        "[TTFB_TRACE] stage-%d processor_done n_outputs=%d elapsed_ms=%.1f t=%.6f",
+                        stage_id, len(request_outputs), (_trace_t_proc_done - _trace_t_poll_ret) * 1000.0,
+                        _trace_t_proc_done,
+                    )
 
                     # Route each processed output
                     for output in request_outputs:
@@ -381,6 +395,10 @@ class Orchestrator:
                                 [output],
                                 req_state,
                             )
+                        logger.info(
+                            "[TTFB_TRACE] req=%s stage-%d route_start t=%.6f",
+                            output.request_id, stage_id, _time.time(),
+                        )
                         await self._route_output(stage_id, output, req_state, stage_metrics)
         finally:
             for task in pending_polls.values():
@@ -400,6 +418,20 @@ class Orchestrator:
         finished = output.finished
         submit_ts = req_state.stage_submit_ts.get(stage_id)
         stage_client = self.stage_clients[stage_id]
+        # TTFB attribution: log the first time each stage produces output
+        # for a request, relative to when that stage was submitted.
+        is_first_stage_output = False
+        if submit_ts is not None and not getattr(req_state, "_first_output_logged", {}).get(stage_id):
+            _first_output = getattr(req_state, "_first_output_logged", None)
+            if _first_output is None:
+                req_state._first_output_logged = {}
+                _first_output = req_state._first_output_logged
+            _first_output[stage_id] = True
+            is_first_stage_output = True
+            logger.info(
+                "[TTFB_TRACE] req=%s stage-%d first_output=%.1fms (submit→first-out) t=%.6f",
+                req_id, stage_id, (_time.time() - submit_ts) * 1000.0, _time.time(),
+            )
 
         # CFG companion handling: companions don't produce user-visible output
         # and don't forward to the next stage directly.
@@ -420,6 +452,11 @@ class Orchestrator:
                     "stage_submit_ts": submit_ts,
                 }
             )
+            if is_first_stage_output:
+                logger.info(
+                    "[TTFB_TRACE] req=%s stage-%d output_queued t=%.6f",
+                    req_id, stage_id, _time.time(),
+                )
         elif stage_metrics is not None:
             await self.output_async_queue.put(
                 {

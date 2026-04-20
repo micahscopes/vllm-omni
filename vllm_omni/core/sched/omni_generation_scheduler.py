@@ -32,6 +32,7 @@ class OmniGenerationScheduler(VLLMScheduler):
         self.chunk_transfer_adapter = None
         if getattr(model_config, "async_chunk", False):
             self.chunk_transfer_adapter = OmniChunkTransferAdapter(self.vllm_config)
+        self._first_scheduled_logged: set[str] = set()
 
     def schedule(self) -> SchedulerOutput:
         """Diffusion fast path:
@@ -116,6 +117,12 @@ class OmniGenerationScheduler(VLLMScheduler):
             cached_additional_information[request.request_id] = getattr(request, "additional_information", None)
             token_budget -= num_new_tokens
             scheduled_running_reqs.append(request)
+            if request.request_id not in self._first_scheduled_logged:
+                self._first_scheduled_logged.add(request.request_id)
+                logger.info(
+                    "[TTFB_TRACE] req=%s stage1_scheduled t=%.6f",
+                    request.request_id, time.time(),
+                )
             req_index += 1
 
         # OMNI: Remove already finished requests from running queue

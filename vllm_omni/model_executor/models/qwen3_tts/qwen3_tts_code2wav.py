@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time as _time
 from collections.abc import Iterable
 from typing import Any
 
@@ -16,6 +17,7 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 from .qwen3_tts_tokenizer import Qwen3TTSTokenizer
 
 logger = init_logger(__name__)
+_FORWARD_TRACE_COUNT = {"n": 0, "max": 80}
 
 
 class Qwen3TTSCode2Wav(nn.Module):
@@ -195,6 +197,16 @@ class Qwen3TTSCode2Wav(nn.Module):
         runtime_additional_information: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> OmniOutput:
+        _trace_t0 = _time.time()
+        _trace_fire = _FORWARD_TRACE_COUNT["n"] < _FORWARD_TRACE_COUNT["max"]
+        if _trace_fire:
+            _FORWARD_TRACE_COUNT["n"] += 1
+            _trace_n = _FORWARD_TRACE_COUNT["n"]
+            _trace_numel = int(input_ids.numel()) if input_ids is not None else 0
+            logger.info(
+                "[TTFB_TRACE] code2wav_forward_enter n=%d numel=%d t=%.6f",
+                _trace_n, _trace_numel, _trace_t0,
+            )
         """Decode codec codes into audio waveform.
 
         input_ids layout per request: [codec_context_frames, *flat_codes]
@@ -267,6 +279,11 @@ class Qwen3TTSCode2Wav(nn.Module):
 
         num_req = len(request_ids_list)
         if not valid_codes_qf:
+            if _trace_fire:
+                logger.info(
+                    "[TTFB_TRACE] code2wav_forward_exit n=%d elapsed_ms=%.1f reason=empty_codes t=%.6f",
+                    _trace_n, (_time.time() - _trace_t0) * 1000.0, _time.time(),
+                )
             return OmniOutput(
                 text_hidden_states=None,
                 multimodal_outputs={
@@ -319,6 +336,11 @@ class Qwen3TTSCode2Wav(nn.Module):
             if wav.shape[0] > 0:
                 audios[idx] = wav.to(dtype=torch.float32).reshape(-1)
 
+        if _trace_fire:
+            logger.info(
+                "[TTFB_TRACE] code2wav_forward_exit n=%d host_ms=%.1f t=%.6f",
+                _trace_n, (_time.time() - _trace_t0) * 1000.0, _time.time(),
+            )
         return OmniOutput(
             text_hidden_states=None,
             multimodal_outputs={"model_outputs": audios, "sr": srs},

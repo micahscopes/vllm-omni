@@ -1153,6 +1153,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         sample_rate_val = 24000
         sample_rate_extracted = False
         first_chunk = True
+        _gen_start_ts = time.time()
+        _first_emit_logged = False
 
         try:
             async for res in generator:
@@ -1229,7 +1231,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                         stream_format="audio",
                         base64_encode=False,
                     )
-                    yield self.create_audio(audio_obj).audio_data
+                    _chunk_bytes = self.create_audio(audio_obj).audio_data
+                    if not _first_emit_logged:
+                        _first_emit_logged = True
+                        logger.info(
+                            "[TTFB_TRACE] req=%s first_pcm_yield=%.1fms (generator→emit)",
+                            request_id, (time.time() - _gen_start_ts) * 1000.0,
+                        )
+                    yield _chunk_bytes
         except asyncio.CancelledError:
             logger.info("Streaming request %s cancelled by client", request_id)
             raise

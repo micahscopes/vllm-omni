@@ -263,11 +263,16 @@ class AsyncOmni(EngineClient, OmniBase):
                     final_stage_id=final_stage_id_for_e2e,
                 )
             else:
+                _t0 = time.time()
                 await self.engine.add_request_async(
                     request_id=request_id,
                     prompt=prompt,
                     sampling_params_list=req_sp_list,
                     final_stage_id=final_stage_id_for_e2e,
+                )
+                logger.info(
+                    "[TTFB_TRACE] req=%s add_request=%.1fms (wall→add_done)",
+                    request_id, (time.time() - wall_start_ts) * 1000.0,
                 )
             submit_ts = time.time()
             req_state.metrics.stage_first_ts[0] = submit_ts
@@ -434,8 +439,15 @@ class AsyncOmni(EngineClient, OmniBase):
         if req_state is None:
             return
 
+        _first_result_ts: float | None = None
         while True:
             result = await req_state.queue.get()
+            if _first_result_ts is None:
+                _first_result_ts = time.time()
+                logger.info(
+                    "[TTFB_TRACE] req=%s first_queue_msg=%.1fms (wall→first-message) t=%.6f",
+                    request_id, (_first_result_ts - wall_start_ts) * 1000.0, _first_result_ts,
+                )
 
             stage_id = result.get("stage_id", 0)
 
